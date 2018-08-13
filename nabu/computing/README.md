@@ -8,7 +8,7 @@ computing modes you can use multiple devices in parallel. For these modes there
 are 2 kinds of jobs:
 1) A parameter server job simply holds the parameters of your model and shares
 them wit the other devices. Multiple parameter servers are possible, in this
-case the parameters will be devide among the servers. A parameter will normally
+case the parameters will be devided among the servers. A parameter will normally
 run on CPU.
 2) A worker job reads parameters from the parameter server, does the actual
 computation and submits gradients back to the parameter server to update the
