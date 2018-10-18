@@ -55,139 +55,157 @@ from tensorflow.contrib.layers.python.layers import layers
 
 ###################################################################################
 
-# code taken from : https://github.com/MycChiu/fast-LayerNorm-TF
-from nabu.neuralnetworks.components.layer_norm_fused_layer import layer_norm_custom
 import numpy as np
-
-#### for debugging the code
-import pdb
-
 
 ###################################################################################
 
-def ln(inputs, epsilon=1e-5, scope=None):
-    """ Computer LN given an input tensor. We get in an input of shape
-    [N X D] and with LN we compute the mean and var for each individual
-    training point across all it's hidden dimensions rather than across
-    the training batch as we do in BN. This gives us a mean and var of shape
-    [N X 1].
-    """
-    mean, var = tf.nn.moments(inputs, [1], keep_dims=True)
-    with tf.variable_scope(scope):
-        scale = tf.get_variable('alpha',
-                                shape=[inputs.get_shape()[1]],
-                                initializer=tf.constant_initializer(1))
-        shift = tf.get_variable('beta',
-                                shape=[inputs.get_shape()[1]],
-                                initializer=tf.constant_initializer(0))
-    LN = scale * (inputs - mean) / tf.sqrt(var + epsilon) + shift
+class LN_LSTMCell(rnn_cell_impl.RNNCell):
 
-    return LN
+		"""
+		LSTM unit with layer normalization 
+		Layer normalization implementation is based on:
+		https://arxiv.org/abs/1607.06450.
+	
+		"""
 
+		def __init__(
+				self,
+				num_units,
+				forget_bias=1.0,
+				input_size=None,
+				reuse=None,
+				use_layer_norm=True,
+				use_recurrent_dropout=False, dropout_keep_prob=0.90,
+				training= True,
+				):
+				"""
+				Initializes the basic LSTM cell.
+				Args:
+					num_units: int, The number of units in the LSTM cell.
+					forget_bias: float, The bias added to forget gates (see above).
+					input_size: Deprecated and unused.
+					
+				"""
 
+				super(LN_LSTMCell, self).__init__(_reuse=reuse)
 
+				if input_size is not None:
+						logging.warn('%s: The input_size parameter is deprecated.',
+												 self)
 
+				self._num_units = num_units
+				self._forget_bias = forget_bias
+				self._reuse = reuse
+				self.use_recurrent_dropout = use_recurrent_dropout
+				self.dropout_keep_prob = dropout_keep_prob
+				self.use_layer_norm = use_layer_norm
 
-def _linear(args, output_size, bias, bias_start=0.0, scope=None):
-    if args is None or (isinstance(args, (list, tuple)) and not args):
-        raise ValueError("`args` must be specified")
-    if not isinstance(args, (list, tuple)):
-        args = [args]
+		@property
+		def state_size(self):
+				return rnn_cell_impl.LSTMStateTuple(self._num_units,
+								self._num_units)
 
-    # Calculate the total size of arguments on dimension 1.
-    total_arg_size = 0
-    shapes = [a.get_shape().as_list() for a in args]
-    for shape in shapes:
-        if len(shape) != 2:
-            raise ValueError(
-                "Linear is expecting 2D arguments: %s" % str(shapes))
-        if not shape[1]:
-            raise ValueError(
-                "Linear expects shape[1] of arguments: %s" % str(shapes))
-        else:
-            total_arg_size += shape[1]
+		@property
+		def output_size(self):
+				return self._num_units
 
-    # Now the computation.
-    with tf.variable_scope(scope or "Linear"):
-        matrix = tf.get_variable("Matrix", [total_arg_size, output_size])
-        if len(args) == 1:
-            res = tf.matmul(args[0], matrix)
-        else:
-            res = tf.matmul(tf.concat(args, 1), matrix)
-        if not bias:
-            return res
-        bias_term = tf.get_variable(
-            "Bias", [output_size],
-            initializer=tf.constant_initializer(bias_start))
-    return res + bias_term
+		def call(self, x, state):
+			with tf.variable_scope("ln"):
+				h, c = state
 
+				h_size = self._num_units
+	  
+				batch_size = x.get_shape().as_list()[0]
+				x_size = x.get_shape().as_list()[1]
+				  
+				w_init= None # uniform
 
-from tensorflow.python.ops.rnn_cell import RNNCell
-try:
-    from tensorflow.contrib.rnn import LSTMStateTuple
-except ImportError:
-    LSTMStateTuple = tf.nn.rnn_cell.LSTMStateTuple
+				h_init=lstm_ortho_initializer()
 
+				W_xh = tf.get_variable('W_xh',
+					[x_size, 4 * self._num_units], initializer=w_init)
 
+				W_hh = tf.get_variable('W_hh_i',
+					[self._num_units, 4*self._num_units], initializer=h_init)
 
+				bias = tf.get_variable('bias',
+					[4 * self._num_units], initializer=tf.constant_initializer(0.0))
 
+				
+				xh = tf.matmul(x,W_xh)
+				hh = tf.matmul(h,W_hh)
+				ln_xh = raw_layer_norm(xh)
+				ln_hh = raw_layer_norm(hh)
+				concat = ln_xh + ln_hh + bias 
+				#concat = xh + hh + bias
+				i, j, f, o = tf.split(concat, 4, 1)
+				g = tf.tanh(j) 
+				new_c = c * tf.sigmoid(f + self._forget_bias) + tf.sigmoid(i)*g
+				new_h = tf.tanh(layer_norm(new_c,self._num_units,scope='ln_c')) * tf.sigmoid(o)
+				
+				return new_h, tf.contrib.rnn.LSTMStateTuple(new_c, new_h)
+		
 
+		
 
-
-class LNLSTMCell(RNNCell):
-    '''
-           add layer_norm to lstm cell
-    '''
-
-    def __init__(self, num_units, forget_bias=1.0, state_is_tuple=True, activation=None, reuse=None):
-
-        super(LNLSTMCell, self).__init__(_reuse=reuse)
-        if not state_is_tuple:
-            logging.warn("%s: Using a concatenated state is slower and will soon be "
-                         "deprecated.  Use state_is_tuple=True.", self)
-        self._num_units = num_units
-        self._forget_bias = forget_bias
-        self._state_is_tuple = state_is_tuple
-        self._activation = activation or math_ops.tanh
-        self._weight_matrix = None
-        self._trans_input = None
-
-    @property
-    def state_size(self):
-        return (LSTMStateTuple(self._num_units, self._num_units)
-                if self._state_is_tuple else 2 * self._num_units)
-
-    @property
-    def output_size(self):
-        return self._num_units
-
-    def __call__(self, inputs, state, scope=None):
-
-        sigmoid = math_ops.sigmoid
-        # Parameters of gates are concatenated into one multiply for efficiency.
-        if self._state_is_tuple:
-            c, h = state
-        else:
-            c, h = array_ops.split(value=state, num_or_size_splits=2, axis=1)
-
-        with tf.variable_scope("Weight", initializer=tf.orthogonal_initializer()):
-            weight_matrix = _linear([inputs, h], 4 * self._num_units, False)
-        # i = input_gate, j = new_input, f = forget_gate, o = output_gate batch_size * dim
-        i, j, f, o = tf.split(weight_matrix, num_or_size_splits=4, axis=1)
-        # no layer normalization on gates
-        i = ln(i, scope='i_LN')
-        j = ln(j, scope='j_LN')
-        f = ln(f, scope='f_LN')
-        o = ln(o, scope='o_LN')
-        new_c = (
-            c * sigmoid(f + self._forget_bias) + sigmoid(i) * self._activation(j))
-        new_h = self._activation(ln(new_c, scope='new_c_LN')) * sigmoid(o)
-
-        if self._state_is_tuple:
-            new_state = LSTMStateTuple(new_c, new_h)
-        else:
-            new_state = tf.concat([new_c,new_h], 1)
-        return new_h, new_state
+		
 
 
+###################################### 
+#custom code for layer normalization #
+######################################
+def lstm_ortho_initializer(scale=1.0):
+  def _initializer(shape, dtype=tf.float32, partition_info=None):
+	size_x = shape[0]
+	size_h = shape[1]//4 # assumes lstm.
+	t = np.zeros(shape)
+	t[:, :size_h] = orthogonal([size_x, size_h])*scale
+	t[:, size_h:size_h*2] = orthogonal([size_x, size_h])*scale
+	t[:, size_h*2:size_h*3] = orthogonal([size_x, size_h])*scale
+	t[:, size_h*3:] = orthogonal([size_x, size_h])*scale
+	return tf.constant(t, dtype)
+  return _initializer
+
+def orthogonal(shape):
+	flat_shape = (shape[0], np.prod(shape[1:]))
+	a = np.random.normal(0.0, 1.0, flat_shape)
+	u, _, v = np.linalg.svd(a, full_matrices=False)
+	q = u if u.shape == flat_shape else v
+	return q.reshape(shape)
+
+def orthogonal_initializer(scale=1.0):
+	def _initializer(shape, dtype=tf.float32, partition_info=None):
+		return tf.constant(orthogonal(shape) * scale, dtype)
+	return _initializer
+
+
+
+
+
+
+def layer_norm(x, num_units, scope="layer_norm", reuse=False, gamma_start=1.0, epsilon = 1e-5, use_bias=True):
+  axes = [1]
+  mean = tf.reduce_mean(x, axes, keep_dims=True)
+  x_shifted = x-mean
+  var = tf.reduce_mean(tf.square(x_shifted), axes, keep_dims=True)
+  inv_std = tf.rsqrt(var + epsilon)
+  with tf.variable_scope(scope):
+    if reuse == True:
+      tf.get_variable_scope().reuse_variables()
+    gamma = tf.get_variable('ln_gamma', [num_units], initializer=tf.constant_initializer(gamma_start))
+    if use_bias:
+      beta = tf.get_variable('ln_beta', [num_units], initializer=tf.constant_initializer(0.0))
+  output = gamma*(x_shifted)*inv_std
+  if use_bias:
+    output = output + beta
+  return output
+
+def raw_layer_norm(x, epsilon=1e-3):
+	  axes = [1]
+	  mean = tf.reduce_mean(x, axes, keep_dims=True)
+	  std = tf.sqrt(
+	      tf.reduce_mean(tf.square(x - mean), axes, keep_dims=True) + epsilon)
+	  output = (x - mean) / (std)
+	  return output
+	
 
