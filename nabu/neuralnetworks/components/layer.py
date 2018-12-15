@@ -4,13 +4,16 @@ Neural network layers '''
 import tensorflow as tf
 from tensorflow.python.ops.rnn import bidirectional_dynamic_rnn
 from nabu.neuralnetworks.components import ops
+from nabu.neuralnetworks.components.recurrent_batch import BatchNormBasicLSTMCell
+
 
 def blstm(
         inputs,
         sequence_length,
         num_units,
-        layer_norm=False,
+        is_training,
         scope=None):
+    
     '''
     a BLSTM layer
 
@@ -32,13 +35,13 @@ def blstm(
 
         #create the lstm cell that will be used for the forward and backward
         #pass
-        lstm_cell_fw = tf.contrib.rnn.LayerNormBasicLSTMCell(
+        lstm_cell_fw = BatchNormBasicLSTMCell(
             num_units=num_units,
-            layer_norm=layer_norm,
+            is_training=is_training,
             reuse=tf.get_variable_scope().reuse)
-        lstm_cell_bw = tf.contrib.rnn.LayerNormBasicLSTMCell(
-            num_units,
-            layer_norm=layer_norm,
+        lstm_cell_bw = BatchNormBasicLSTMCell(
+            num_units=num_units,
+            is_training=is_training,
             reuse=tf.get_variable_scope().reuse)
 
         #do the forward computation
@@ -53,9 +56,9 @@ def blstm(
 def pblstm(
         inputs,
         sequence_length,
+        is_training,
         num_units,
         num_steps=2,
-        layer_norm=False,
         scope=None):
     '''
     a Pyramidal BLSTM layer
@@ -82,7 +85,7 @@ def pblstm(
             inputs=inputs,
             sequence_length=sequence_length,
             num_units=num_units,
-            layer_norm=layer_norm
+            is_training=is_training
         )
 
         #stack the outputs
